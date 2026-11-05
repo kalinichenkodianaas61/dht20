@@ -20,7 +20,7 @@
 
 // status byte
 #define DHT20_STATUS_BUSY 0x80 // bit[7]: 1 - busy, 0 - idle
-#define DHT20_STATUS_CAL_MASK 0x18 // bit[3]: 1 - calibrated, 0 - uncalibrated 
+#define DHT20_STATUS_CAL_MASK 0x18 // bit[3] and bit[4]: 1 - calibrated, 0 - uncalibrated 
 
 // data layout
 #define DHT20_DATA_LEN 7 // status + 5 data bytes + CRC
@@ -37,7 +37,7 @@
 #define DHT20_DELAY_POWER_ON_MS 300 // wait after power-on, datasheet needs >= 100
 #define DHT20_DELAY_BEFORE_CMD_MS 10 // pause between trigger command
 #define DHT20_DELAY_MEASURE_MS 80 // measurement time 
-#define DHT20_PERIOD_MS 3000 // pause between measurements, datasheet advises >= 3000
+#define DHT20_PERIOD_MS 3000 // pause between measurements, datasheet advises >= 2000
 
 // i2c transaction timeout
 #define DHT20_XFER_TIMEOUT_MS 100 
@@ -53,7 +53,7 @@ static esp_err_t dht20_read (i2c_master_dev_handle_t dev, float *hum, float *tem
 	
 	// (1) trigger measurement 
 	vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_BEFORE_CMD_MS));
-	err = (i2c_master_transmit(dev, trigger_reading, 3, DHT20_XFER_TIMEOUT_MS));
+	err = (i2c_master_transmit(dev, trigger_reading, sizeof(trigger_reading), DHT20_XFER_TIMEOUT_MS));
 	if (err != ESP_OK) {
 		return err;
 	}
@@ -84,7 +84,7 @@ static esp_err_t dht20_read (i2c_master_dev_handle_t dev, float *hum, float *tem
 	
 	return ESP_OK;
 	
-};
+}
 
 
 
@@ -124,7 +124,7 @@ void app_main(void) {
 	uint8_t calibrate_output = 0;
 	
 	ESP_ERROR_CHECK(i2c_master_receive(dht20, &calibrate_output, 1, DHT20_XFER_TIMEOUT_MS));
-	if ((calibrate_output & 0x18) == 0x18) {
+	if ((calibrate_output & DHT20_STATUS_CAL_MASK) == DHT20_STATUS_CAL_MASK) {
 		ESP_LOGI(TAG, "calibrate output: 0x%02X (expected 0x18)", calibrate_output);
 	} else {
 		ESP_LOGW(TAG, "calibrate output: 0x%02X (expected 0x18)", calibrate_output);
@@ -133,13 +133,13 @@ void app_main(void) {
 	
 	// reading temp/hum in loop
 	while (1) {
-		float hum, temp = 0;
+		float hum = 0, temp = 0;
 		
 		esp_err_t err = dht20_read(dht20, &hum, &temp);
 		if (err != ESP_OK) {
 			ESP_LOGW(TAG, "dht20 read failed: %s", esp_err_to_name(err));
 		} else {
-			ESP_LOGI(TAG, "hum: %.*f%% | temp: %.*f ", 
+			ESP_LOGI(TAG, "hum: %.*f%% | temp: %.*fC ", 
 				DHT20_DP_NUMBER, hum, 
 				DHT20_DP_NUMBER, temp);
 		}
