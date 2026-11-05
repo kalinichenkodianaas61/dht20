@@ -31,6 +31,7 @@
 #define DHT20_HUM_SCALE 100.0f // humidity range in %
 #define DHT20_TEMP_SCALE 200.0f // temperature range in Celsius 
 #define DHT20_TEMP_OFFSET 50.0f // temperature offset in Celsius
+#define DHT20_DP_NUMBER 2 // number of decimal places (temp and hum)
 
 // delays in ms
 #define DHT20_DELAY_POWER_ON_MS 300 // wait after power-on, datasheet needs >= 100
@@ -43,6 +44,49 @@
 
 
 static const char *TAG = "dht20";
+
+
+static esp_err_t dht20_read (i2c_master_dev_handle_t dev, float *hum, float *temp) {
+	uint8_t trigger_reading[3] = {DHT20_CMD_MEASURE, DHT20_CMD_MEASURE_ARG1, DHT20_CMD_MEASURE_ARG2};
+	uint8_t data[DHT20_DATA_LEN];
+	esp_err_t err;
+	
+	// (1) trigger measurement 
+	vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_BEFORE_CMD_MS));
+	err = (i2c_master_transmit(dev, trigger_reading, 3, DHT20_XFER_TIMEOUT_MS));
+	if (err != ESP_OK) {
+		return err;
+	}
+	
+	// (2) wait until the sensor finishes measuring
+	vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_MEASURE_MS));
+	
+	// (3) read 7 bytes: status + 5 data bytes + CRC
+	err = i2c_master_receive(dev, data, DHT20_DATA_LEN, DHT20_XFER_TIMEOUT_MS);
+	if (err != ESP_OK) {
+		return err;
+	}
+	
+	// (4) check if sensor busy
+	if (data[0] & DHT20_STATUS_BUSY) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	
+	// (5) combine bits
+	// hum = 20 bits -> data[1], data[2], high nibble of data[3]
+	// temp = 20 bits -> low nibble of data[3], data[4], data[5]
+	uint32_t raw_hum = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) | ((uint32_t)data[3] >> 4);
+	uint32_t raw_temp = ((uint32_t)(data[3] & DHT20_NIBBLE_MASK) << 16) | ((uint32_t)data[4] << 8) | ((uint32_t)data[5]);
+	
+	// (6) convert to real values
+	*hum = raw_hum / DHT20_RAW_FULL_SCALE * DHT20_HUM_SCALE;
+	*temp = raw_temp / DHT20_RAW_FULL_SCALE * DHT20_TEMP_SCALE - DHT20_TEMP_OFFSET;
+	
+	return ESP_OK;
+	
+};
+
+
 
 void app_main(void) {
 	vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_POWER_ON_MS));
@@ -89,31 +133,15 @@ void app_main(void) {
 	
 	// reading temp/hum in loop
 	while (1) {
-		// triggering temp and hum reading
-		uint8_t trigger_reading[3] = {DHT20_CMD_MEASURE, DHT20_CMD_MEASURE_ARG1, DHT20_CMD_MEASURE_ARG2};
-		vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_BEFORE_CMD_MS));
-	
-		esp_err_t err1 = (i2c_master_transmit(dht20, trigger_reading, 3, DHT20_XFER_TIMEOUT_MS));
-		if (err1 != ESP_OK) {
-			ESP_LOGW(TAG, "dht20 read failed: %s", esp_err_to_name(err1));
-			vTaskDelay(pdMS_TO_TICKS(DHT20_PERIOD_MS));
-			continue;
-		}
-		vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_MEASURE_MS));
+		float hum, temp = 0;
 		
-		
-		uint8_t data[7];
-		
-		// reading temp and hum bits
-		esp_err_t err2 = (i2c_master_receive(dht20, data, 7, DHT20_XFER_TIMEOUT_MS));
-		if (((data[0] & DHT20_STATUS_BUSY) == 0) && (err2 == ESP_OK))  {
-			uint32_t raw_hum = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) | ((uint32_t)data[3] >> 4);
-			uint32_t raw_temp = ((uint32_t)(data[3] & 0x0F) << 16) | ((uint32_t)data[4] << 8) | ((uint32_t)data[5]);
-			
-			ESP_LOGI(TAG, "hum: %.2f%% | temp: %.2f",
-				(raw_hum / DHT20_RAW_FULL_SCALE * DHT20_HUM_SCALE), (raw_temp / DHT20_RAW_FULL_SCALE * DHT20_TEMP_SCALE - DHT20_TEMP_OFFSET));
+		esp_err_t err = dht20_read(dht20, &hum, &temp);
+		if (err != ESP_OK) {
+			ESP_LOGW(TAG, "dht20 read failed: %s", esp_err_to_name(err));
 		} else {
-			ESP_LOGW(TAG, "dht20 read failed: %s", esp_err_to_name(err2));
+			ESP_LOGI(TAG, "hum: %.*f%% | temp: %.*f ", 
+				DHT20_DP_NUMBER, hum, 
+				DHT20_DP_NUMBER, temp);
 		}
 		
 		vTaskDelay(pdMS_TO_TICKS(DHT20_PERIOD_MS));
