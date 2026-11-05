@@ -20,7 +20,7 @@
 
 // status byte
 #define DHT20_STATUS_BUSY 0x80 // bit[7]: 1 - busy, 0 - idle
-#define DHT20_STATUS_CAL_MASK 0x18 // bit[3] and bit[4]: 1 - calibrated, 0 - uncalibrated 
+#define DHT20_STATUS_CAL_MASK 0x18 // bit[3]: 1 - calibrated, 0 - uncalibrated 
 
 // data layout
 #define DHT20_DATA_LEN 7 // status + 5 data bytes + CRC
@@ -35,7 +35,7 @@
 
 // delays in ms
 #define DHT20_DELAY_POWER_ON_MS 300 // wait after power-on, datasheet needs >= 100
-#define DHT20_DELAY_BEFORE_CMD_MS 10 // pause between trigger command
+#define DHT20_DELAY_BEFORE_CMD_MS 10 // pause before trigger command
 #define DHT20_DELAY_MEASURE_MS 80 // measurement time 
 #define DHT20_PERIOD_MS 3000 // pause between measurements, datasheet advises >= 2000
 
@@ -46,6 +46,58 @@
 static const char *TAG = "dht20";
 
 
+static esp_err_t dht20_init (i2c_master_dev_handle_t *dev) {
+	esp_err_t err;
+	
+	// (1) wait for sensor to wake up
+	vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_POWER_ON_MS));
+	
+	// (2) adding bus
+	i2c_master_bus_config_t bus_cfg = {
+		.i2c_port = I2C_NUM_0,
+		.sda_io_num = SDA_GPIO, 
+		.scl_io_num = SCL_GPIO, 
+		.clk_source = I2C_CLK_SRC_DEFAULT, 
+		.glitch_ignore_cnt = 7,
+		.flags.enable_internal_pullup = true,
+	};
+	i2c_master_bus_handle_t bus;
+	err = i2c_new_master_bus(&bus_cfg, &bus);
+	if (err != ESP_OK) {
+		return err;
+	}
+	
+	// (3) adding device 
+	i2c_device_config_t dev_cfg = {
+		.dev_addr_length = I2C_ADDR_BIT_LEN_7,
+		.device_address = DHT20_ADDR,
+		.scl_speed_hz = DHT20_SCL_SPEED_HZ,
+	};
+	err = i2c_master_bus_add_device(bus, &dev_cfg, dev);
+	if (err != ESP_OK) {
+		return err;
+	}
+	
+	// (4) check if dht20 is calibrated
+	uint8_t calibrate_output = 0;
+	
+	err = i2c_master_receive(*dev, &calibrate_output, 1, DHT20_XFER_TIMEOUT_MS);
+	if (err != ESP_OK) {
+		return err;
+	} 
+	if ((calibrate_output & DHT20_STATUS_CAL_MASK) == DHT20_STATUS_CAL_MASK) {
+		ESP_LOGI(TAG, "calibrate output: 0x%02X (expected 0x%02X)", calibrate_output, DHT20_STATUS_CAL_MASK);
+	} else {
+		ESP_LOGW(TAG, "calibrate output: 0x%02X (expected 0x%02X)", calibrate_output, DHT20_STATUS_CAL_MASK);
+	}
+
+	
+	return ESP_OK;		
+}
+
+
+
+
 static esp_err_t dht20_read (i2c_master_dev_handle_t dev, float *hum, float *temp) {
 	uint8_t trigger_reading[3] = {DHT20_CMD_MEASURE, DHT20_CMD_MEASURE_ARG1, DHT20_CMD_MEASURE_ARG2};
 	uint8_t data[DHT20_DATA_LEN];
@@ -53,7 +105,7 @@ static esp_err_t dht20_read (i2c_master_dev_handle_t dev, float *hum, float *tem
 	
 	// (1) trigger measurement 
 	vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_BEFORE_CMD_MS));
-	err = (i2c_master_transmit(dev, trigger_reading, sizeof(trigger_reading), DHT20_XFER_TIMEOUT_MS));
+	err = i2c_master_transmit(dev, trigger_reading, sizeof(trigger_reading), DHT20_XFER_TIMEOUT_MS);
 	if (err != ESP_OK) {
 		return err;
 	}
@@ -89,46 +141,8 @@ static esp_err_t dht20_read (i2c_master_dev_handle_t dev, float *hum, float *tem
 
 
 void app_main(void) {
-	vTaskDelay(pdMS_TO_TICKS(DHT20_DELAY_POWER_ON_MS));
-	// adding bus
-	i2c_master_bus_config_t bus_cfg = {
-		.i2c_port = I2C_NUM_0,
-		.sda_io_num = SDA_GPIO, 
-		.scl_io_num = SCL_GPIO, 
-		.clk_source = I2C_CLK_SRC_DEFAULT, 
-		.glitch_ignore_cnt = 7,
-		.flags.enable_internal_pullup = true,
-	};
-	i2c_master_bus_handle_t bus;
-	ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus));
-	
-	
-	// checking if anyone is on the bus
-	for (uint8_t addr = 1; addr < 127; addr++) {
-		if (i2c_master_probe(bus, addr, DHT20_XFER_TIMEOUT_MS) == ESP_OK) {
-			ESP_LOGI(TAG, "find device at 0x%02X", addr);
-		} 
-	} 
-	
-	
-	// adding device 
-	i2c_device_config_t dev_cfg = {
-		.dev_addr_length = I2C_ADDR_BIT_LEN_7,
-		.device_address = DHT20_ADDR,
-		.scl_speed_hz = DHT20_SCL_SPEED_HZ,
-	};
-	i2c_master_dev_handle_t dht20;
-	ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg, &dht20));
-	
-	// check if dht20 is calibrated
-	uint8_t calibrate_output = 0;
-	
-	ESP_ERROR_CHECK(i2c_master_receive(dht20, &calibrate_output, 1, DHT20_XFER_TIMEOUT_MS));
-	if ((calibrate_output & DHT20_STATUS_CAL_MASK) == DHT20_STATUS_CAL_MASK) {
-		ESP_LOGI(TAG, "calibrate output: 0x%02X (expected 0x18)", calibrate_output);
-	} else {
-		ESP_LOGW(TAG, "calibrate output: 0x%02X (expected 0x18)", calibrate_output);
-	}	
+	i2c_master_dev_handle_t dht20;	
+	ESP_ERROR_CHECK(dht20_init(&dht20));
 	
 	
 	// reading temp/hum in loop
@@ -149,8 +163,6 @@ void app_main(void) {
 		
 		
 	}	
-	
-	
 	
 	
 	
